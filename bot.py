@@ -1,15 +1,9 @@
-import datetime
-import time
-import asyncio
-import logging
-import os
-import json
-import re
+import datetime, time, asyncio, logging, os, json, re
 from telethon import TelegramClient, errors, types
 
 # Налаштування Telegram API
-api_id = id
-api_hash = 'hash'
+api_id = 
+api_hash = ''
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -20,6 +14,11 @@ with open('channels.json', 'r', encoding='utf-8') as file:
     namechannel = config['namechannel']
     source_channels = list(namechannel.keys())
     target_channel = config['target_channel']
+
+# Завантаження регулярних виразів
+with open('regex_patterns.json', 'r', encoding='utf-8') as file:
+    regex_config = json.load(file)
+    regex_patterns = regex_config['patterns']
 
 # Функція для завантаження останніх ID повідомлень з файлу
 def load_last_message_ids():
@@ -41,49 +40,46 @@ def save_last_message_ids(last_message_ids):
 
 # Функція форматування тексту повідомлення
 async def format_post_message(post, source_channel):
-    """
-    Форматує повідомлення з розділенням на частини, 
-    якщо підпис занадто довгий.
-    """
     date_str = post.date.astimezone(datetime.timezone(datetime.timedelta(hours=3))).strftime("%d/%m/%Y %H:%M:%S")
-    message_text = re.sub(r'<a.*?</a>|(@\S+)|#\S+|source|github|поддержать|Check our GitHub repo for further details about the update.', '', post.message)
+    message_text = post.message if post.message else ''
+    for pattern in regex_patterns:
+        message_text = re.sub(pattern, '', message_text)
+    
     post_url = f"[@{source_channel}/{post.id}](https://t.me/{source_channel}/{post.id})"
 
-    # Безпечна максимальна довжина для підпису
-    max_length = 1024  # Залишаємо простір для інших елементів повідомлення 
-
-    # Розділення підпису на частини 
-    message_parts = [message_text[i:i+max_length] for i in range(0, len(message_text), max_length)]
-
-    # Форматування повідомлень
-    formatted_messages = []
-    for i, part in enumerate(message_parts):
-        if i == 0:
-            formatted_message = f"""
+    formatted_message = f"""
 **Channel:** {namechannel[source_channel]}
 **Date:** {date_str}
 **Link:** {post_url}
-**Description:** {part}
 """
-        else:
-            formatted_message = f"""
-**Description (cont'd):** {part}
-"""
-        formatted_messages.append(formatted_message)
-    return formatted_messages
+
+    # Перевірка довжини перед додаванням опису
+    if len(formatted_message) + len(message_text) <= 4096:
+        formatted_message += f"**Description:** {message_text}"
+    else:
+        formatted_message += "**Description:** too long..."
+
+    return [formatted_message]  # Повертаємо список, навіть з одним повідомленням 
 
 # Функція публікації повідомлення в каналі
 async def publish_message(client, messages, target_channel, document=None):
-    """
-    Публікує повідомлення в цільовому каналі, обробляючи
-    розділені повідомлення та документ (якщо є).
-    """
     try:
         for message in messages:
-            if document is not None:
-                await client.send_message(target_channel, message, file=document)
-            else:
-                await client.send_message(target_channel, message)
+            try:
+                if document is not None:
+                    await client.send_message(target_channel, message, file=document)
+                else:
+                    await client.send_message(target_channel, message)
+            except errors.RPCError as e:
+                if "caption is too long" in str(e) or "The caption is too long (caused by SendMediaRequest)" in str(e):
+                    logging.warning("Повідомлення занадто довге. Відправка без повного опису.")
+                    short_message = f"{message.split('**Description:**')[0]}**Description:** too long..."
+                    if document is not None:
+                        await client.send_message(target_channel, short_message, file=document)  # Відправка з коротким описом
+                    else:
+                        await client.send_message(target_channel, short_message)  # Відправка з коротким описом
+                else:
+                    raise e
 
     except errors.FloodWaitError as e:
         wait_time = datetime.timedelta(seconds=e.seconds)
