@@ -69,7 +69,7 @@ async def process_messages(client, source_channel, target_channel, last_message_
         last_message_ids[source_channel] = max(last_message_ids.get(source_channel, 0), post.id)
 
 async def main():
-    mode = int(input("Введите режим работы (1 - простой репост, 2 - форматирование сообщения): "))
+    mode = int(input("Введіть режим роботи (1 - простий репост, 2 - форматування повідомлення): "))
     client = TelegramClient('session_name', api_id, api_hash)
     await client.start()
     last_message_ids = load_last_message_ids()
