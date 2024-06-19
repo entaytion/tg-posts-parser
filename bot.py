@@ -17,19 +17,17 @@ with open('regex_patterns.json', 'r', encoding='utf-8') as file:
 
 def load_last_message_ids():
     if os.path.exists('last_message_ids.json'):
-        with open('last_message_ids.json', 'r', encoding='utf-8') as file:
-            return {
-                key: int(value) if value is not None else None
-                for key, value in json.load(file).items()
-            }
+        try:
+            with open('last_message_ids.json', 'r', encoding='utf-8') as file:
+                return json.load(file)
+        except json.JSONDecodeError:
+            return {'last_message_ids': {}}
     else:
-        return {}
+        return {'last_message_ids': {}}
 
 def save_last_message_ids(last_message_ids):
     with open('last_message_ids.json', 'w', encoding='utf-8') as file:
-        json.dump({
-            key: str(value) for key, value in last_message_ids.items()
-        }, file, ensure_ascii=False)
+        json.dump(last_message_ids, file, ensure_ascii=False)
 
 async def format_post_message(post, source_channel):
     date_str = post.date.astimezone(datetime.timezone(datetime.timedelta(hours=3))).strftime("%d/%m/%Y %H:%M:%S")
@@ -57,7 +55,9 @@ async def forward_documents(client, post, target_channel):
         await client.send_file(target_channel, document)
 
 async def process_messages(client, source_channel, target_channel, last_message_ids, mode):
-    async for post in client.iter_messages(source_channel, min_id=last_message_ids.get(source_channel, 0), reverse=True):
+    last_message_id = last_message_ids['last_message_ids'].get(source_channel, 0)
+    async for post in client.iter_messages(source_channel, min_id=last_message_id, reverse=True):
+        last_message_id = max(last_message_id, post.id)
         if post.media and isinstance(post.media, types.MessageMediaDocument):
             if mode == 1:
                 await client.forward_messages(target_channel, post.id, source_channel)
@@ -66,14 +66,24 @@ async def process_messages(client, source_channel, target_channel, last_message_
                 formatted_messages = await format_post_message(post, source_channel)
                 for message in formatted_messages:
                     await publish_message(client, target_channel, message)
-        last_message_ids[source_channel] = max(last_message_ids.get(source_channel, 0), post.id)
+    last_message_ids['last_message_ids'][source_channel] = last_message_id
+
+async def initialize_new_channel(client, source_channel, last_message_ids):
+    async for post in client.iter_messages(source_channel, limit=1):
+        last_message_ids['last_message_ids'][source_channel] = post.id
 
 async def main():
     mode = int(input("Введіть режим роботи (1 - простий репост, 2 - форматування повідомлення): "))
     client = TelegramClient('session_name', api_id, api_hash)
     await client.start()
     last_message_ids = load_last_message_ids()
+    
     try:
+        for source_channel in source_channels:
+            if source_channel not in last_message_ids['last_message_ids']:
+                await initialize_new_channel(client, source_channel, last_message_ids)
+        save_last_message_ids(last_message_ids)
+
         while True:
             for source_channel in source_channels:
                 await process_messages(client, source_channel, target_channel, last_message_ids, mode)
