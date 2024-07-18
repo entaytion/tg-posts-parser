@@ -50,14 +50,26 @@ async def publish_message(client, target_channel, message):
     await client.send_message(target_channel, message, link_preview=False)
 
 async def forward_documents(client, post, target_channel):
-    documents = [message for message in post.media.document if message]
-    for document in documents:
-        await client.send_file(target_channel, document)
+    try:
+        await client.send_file(
+            target_channel,
+            post.media.document,
+            caption=post.message,
+            link_preview=False
+        )
+    except errors.FloodWaitError as e:
+        logging.warning(f"Flood wait error: sleeping for {e.seconds} seconds")
+        await asyncio.sleep(e.seconds)
+    except errors.RPCError as e:
+        logging.error(f"Failed to forward document: {e}")
 
 async def process_messages(client, source_channel, target_channel, last_message_ids, mode):
     last_message_id = last_message_ids['last_message_ids'].get(source_channel, 0)
     async for post in client.iter_messages(source_channel, min_id=last_message_id, reverse=True):
         last_message_id = max(last_message_id, post.id)
+        if post.sticker:
+            logging.info(f'Skipping sticker message {post.id} in channel {source_channel}')
+            continue
         if post.media and isinstance(post.media, types.MessageMediaDocument):
             if mode == 1:
                 await client.forward_messages(target_channel, post.id, source_channel)
