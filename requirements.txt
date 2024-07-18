@@ -6,3 +6,4 @@ os
 json
 re
 telethon
+requests
