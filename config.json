@@ -1,0 +1,22 @@
+{
+    "api_id": 0,
+    "api_hash": "hash",
+    "channels": {
+        "test": {
+            "name": "test",
+            "last_id": 0
+        }
+    },
+    "target_channel": [
+        "test"
+    ],
+    "regex_patterns": [
+        "test"
+    ],
+    "repositories": {
+        "user/repo": {
+            "app_name": "test",
+            "latest_version": "0"
+        }
+    }
+}

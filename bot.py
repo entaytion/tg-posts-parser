@@ -1,110 +1,207 @@
-import datetime, time, asyncio, logging, os, json, re
+import datetime, time, asyncio, logging, os, json, re, requests
 from telethon import TelegramClient, errors, types
 
-api_id = id
-api_hash = 'hash'
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+CONFIG_FILENAME = 'config.json'
 
-with open('channels.json', 'r', encoding='utf-8') as file:
-    config = json.load(file)
-    namechannel = config['namechannel']
-    source_channels = list(namechannel.keys())
-    target_channel = config['target_channel']
+class ConfigManager:
+    def __init__(self, filename):
+        self.filename = filename
+        self.config = self.load_config()
 
-with open('regex_patterns.json', 'r', encoding='utf-8') as file:
-    regex_config = json.load(file)
-    regex_patterns = regex_config['patterns']
+    def load_config(self):
+        with open(self.filename, 'r', encoding='utf-8') as f:
+            return json.load(f)
 
-def load_last_message_ids():
-    if os.path.exists('last_message_ids.json'):
-        try:
-            with open('last_message_ids.json', 'r', encoding='utf-8') as file:
-                return json.load(file)
-        except json.JSONDecodeError:
-            return {'last_message_ids': {}}
-    else:
-        return {'last_message_ids': {}}
+    def save_config(self):
+        with open(self.filename, 'w', encoding='utf-8') as f:
+            json.dump(self.config, f, ensure_ascii=False, indent=4)
 
-def save_last_message_ids(last_message_ids):
-    with open('last_message_ids.json', 'w', encoding='utf-8') as file:
-        json.dump(last_message_ids, file, ensure_ascii=False)
+class FileManager:
+    @staticmethod
+    def download_file(url, local_filename):
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()
+            with open(local_filename, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        return local_filename
 
-async def format_post_message(post, source_channel):
-    date_str = post.date.astimezone(datetime.timezone(datetime.timedelta(hours=3))).strftime("%d/%m/%Y %H:%M:%S")
-    message_text = post.message if post.message else ''
-    for pattern in regex_patterns:
-        message_text = re.sub(pattern, '', message_text)
-    post_url = f"[@{source_channel}/{post.id}](https://t.me/{source_channel}/{post.id})"
-    formatted_message = (
-        f"**Channel:** {namechannel[source_channel]}\n"
-        f"**Date:** {date_str}\n"
-        f"**Link:** {post_url}\n"
-    )
-    if len(formatted_message) + len(message_text) <= 4096:
-        formatted_message += f"**Description:** {message_text}"
-    else:
-        formatted_message += "**Description:** too long..."
-    return [formatted_message]
+class MessageFormatter:
+    @staticmethod
+    def format_description(description):
+        description = re.sub(r'^(#+\s)', '', description, flags=re.MULTILINE)
+        description = re.sub(r'@\w+', '', description)
+        description = re.sub(r'\(#\d+\)', '', description)
+        description = ' '.join(description.split())
+        return description
 
-async def publish_message(client, target_channel, message):
-    await client.send_message(target_channel, message, link_preview=False)
-
-async def forward_documents(client, post, target_channel):
-    try:
-        await client.send_file(
-            target_channel,
-            post.media.document,
-            caption=post.message,
-            link_preview=False
+    @staticmethod
+    async def format_post_message(post, source_channel, regex_patterns, channels):
+        date_str = post.date.astimezone(datetime.timezone(datetime.timedelta(hours=3))).strftime("%d/%m/%Y %H:%M:%S")
+        message_text = post.message if post.message else ''
+        for pattern in regex_patterns:
+            message_text = re.sub(pattern, '', message_text)
+        post_url = f"[@{source_channel}/{post.id}](https://t.me/{channels[source_channel]['id']}/{post.id})"
+        formatted_message = (
+            f"**Channel:** {channels[source_channel]['name']}\n"
+            f"**Date:** {date_str}\n"
+            f"**Link:** {post_url}\n"
         )
-    except errors.FloodWaitError as e:
-        logging.warning(f"Flood wait error: sleeping for {e.seconds} seconds")
-        await asyncio.sleep(e.seconds)
-    except errors.RPCError as e:
-        logging.error(f"Failed to forward document: {e}")
+        if len(formatted_message) + len(message_text) <= 4096:
+            formatted_message += f"**Description:** {message_text}"
+        else:
+            formatted_message += "**Description:** too long..."
+        return [formatted_message]
 
-async def process_messages(client, source_channel, target_channel, last_message_ids, mode):
-    last_message_id = last_message_ids['last_message_ids'].get(source_channel, 0)
-    async for post in client.iter_messages(source_channel, min_id=last_message_id, reverse=True):
-        last_message_id = max(last_message_id, post.id)
-        if post.sticker:
-            logging.info(f'Skipping sticker message {post.id} in channel {source_channel}')
-            continue
-        if post.media and isinstance(post.media, types.MessageMediaDocument):
-            if mode == 1:
-                await client.forward_messages(target_channel, post.id, source_channel)
-            elif mode == 2:
-                await forward_documents(client, post, target_channel)
-                formatted_messages = await format_post_message(post, source_channel)
-                for message in formatted_messages:
-                    await publish_message(client, target_channel, message)
-    last_message_ids['last_message_ids'][source_channel] = last_message_id
+class TelegramManager:
+    def __init__(self, config_manager):
+        self.config_manager = config_manager
+        self.config = config_manager.config
+        self.client = TelegramClient('session_name', self.config['api_id'], self.config['api_hash'])
 
-async def initialize_new_channel(client, source_channel, last_message_ids):
+    async def start(self):
+        await self.client.start()
+
+    async def stop(self):
+        await self.client.disconnect()
+
+    async def publish_message(self, target_channels, message):
+        for channel in target_channels:
+            await self.client.send_message(channel, message, link_preview=False)
+
+    async def forward_documents(self, post, target_channels):
+        for channel in target_channels:
+            try:
+                await self.client.send_file(
+                    channel,
+                    post.media.document,
+                    caption=post.message,
+                    link_preview=False
+                )
+            except errors.FloodWaitError as e:
+                logging.warning(f"Flood wait error: sleeping for {e.seconds} seconds")
+                await asyncio.sleep(e.seconds)
+            except errors.RPCError as e:
+                logging.error(f"Failed to forward document to {channel}: {e}")
+
+    async def process_messages(self, source_channel, target_channels, mode):
+        last_id = self.config['channels'][source_channel].get('last_id', 0)
+        async for post in self.client.iter_messages(source_channel, min_id=last_id, reverse=True):
+            if post.id <= last_id:
+                continue
+            self.config['channels'][source_channel]['last_id'] = post.id
+            if post.sticker:
+                logging.info(f'Skipping sticker message {post.id} in channel {source_channel}')
+                continue
+            if post.media and isinstance(post.media, types.MessageMediaDocument):
+                if mode == 1:
+                    for channel in target_channels:
+                        await self.client.forward_messages(channel, post.id, source_channel)
+                elif mode == 2:
+                    await self.forward_documents(post, target_channels)
+                    formatted_messages = await MessageFormatter.format_post_message(post, source_channel, self.config['regex_patterns'], self.config['channels'])
+                    for message in formatted_messages:
+                        await self.publish_message(target_channels, message)
+        self.config_manager.save_config()
+
+class GitHubManager:
+    def __init__(self, config_manager):
+        self.config_manager = config_manager
+        self.config = config_manager.config
+
+    async def process_github_releases(self, client, target_channels):
+        for repo, repo_info in self.config['repositories'].items():
+            APP_NAME = repo_info['app_name']
+            LATEST_VERSION = repo_info.get('latest_version', '')
+            GITHUB_RELEASES_URL = f"https://api.github.com/repos/{repo}/releases/latest"
+
+            response = requests.get(GITHUB_RELEASES_URL)
+            release = response.json()
+            assets = release.get('assets', [])
+            tag_name = release.get('tag_name', 'N/A')
+            body = release.get('body', 'No description provided.')
+            html_url = release.get('html_url', f'https://github.com/{repo}/releases')
+
+            if tag_name == LATEST_VERSION:
+                logging.info(f"Release {tag_name} for {APP_NAME} is already up-to-date.")
+                continue
+
+            body = MessageFormatter.format_description(body)
+
+            if len(body) > 1024:
+                body = f"[too long]({html_url})"
+
+            if not assets:
+                logging.info(f"No assets found in the latest release for {APP_NAME}.")
+                continue
+
+            for CHANNEL_ID in target_channels:
+                async for message in client.iter_messages(CHANNEL_ID, search=tag_name):
+                    if tag_name in message.message:
+                        logging.info(f"Release {tag_name} for {APP_NAME} already posted in {CHANNEL_ID}.")
+                        break
+                else:
+                    asset_files = [asset for asset in assets if asset['name'].endswith(('.apk', '.apks', '.aab'))]
+
+                    for asset in asset_files:
+                        asset_url = asset['browser_download_url']
+                        local_filename = asset['name']
+
+                        logging.info(f"Downloading {local_filename}...")
+                        FileManager.download_file(asset_url, local_filename)
+                        logging.info(f"Downloaded {local_filename}.")
+
+                        message = (
+                            f"**Name**: [{APP_NAME}](https://github.com/{repo})\n"
+                            f"**Version**: {tag_name}\n"
+                            f"**Description**: {body}\n"
+                            f"**Tags**: #opensource"
+                        )
+
+                        logging.info(f"Uploading {local_filename} to Telegram...")
+                        await client.send_file(CHANNEL_ID, local_filename, caption=message)
+                        logging.info(f"Uploaded {local_filename} to Telegram.")
+
+                        os.remove(local_filename)
+
+                    repo_info['latest_version'] = tag_name
+                    self.config_manager.save_config()
+
+
+async def initialize_new_channel(client, source_channel, channels):
     async for post in client.iter_messages(source_channel, limit=1):
-        last_message_ids['last_message_ids'][source_channel] = post.id
+        if 'last_id' not in channels[source_channel] or channels[source_channel]['last_id'] == 0:
+            channels[source_channel]['last_id'] = post.id
+        break
 
 async def main():
-    mode = int(input("Введіть режим роботи (1 - простий репост, 2 - форматування повідомлення): "))
-    client = TelegramClient('session_name', api_id, api_hash)
-    await client.start()
-    last_message_ids = load_last_message_ids()
-    
+    config_manager = ConfigManager(CONFIG_FILENAME)
+    telegram_manager = TelegramManager(config_manager)
+    github_manager = GitHubManager(config_manager)
+
+    mode = int(input("1 - repost messages\n2 - format messages\n3 - repost messages + github\n4 - format messages + github:\nEnter mode: "))
+
+    await telegram_manager.start()
+
     try:
-        for source_channel in source_channels:
-            if source_channel not in last_message_ids['last_message_ids']:
-                await initialize_new_channel(client, source_channel, last_message_ids)
-        save_last_message_ids(last_message_ids)
+        for source_channel in config_manager.config['channels']:
+            if 'last_id' not in config_manager.config['channels'][source_channel] or config_manager.config['channels'][source_channel]['last_id'] == 0:
+                await initialize_new_channel(telegram_manager.client, source_channel, config_manager.config['channels'])
+        
+        config_manager.save_config()
 
         while True:
-            for source_channel in source_channels:
-                await process_messages(client, source_channel, target_channel, last_message_ids, mode)
-            save_last_message_ids(last_message_ids)
+            for source_channel in config_manager.config['channels']:
+                await telegram_manager.process_messages(source_channel, config_manager.config['target_channel'], mode)
+            if mode in [3, 4]:
+                await telegram_manager.process_messages(source_channel, config_manager.config['target_channel'], mode)
+                await github_manager.process_github_releases(telegram_manager.client, config_manager.config['target_channel'])
             await asyncio.sleep(15)
     except Exception as e:
         logging.error(f"An error occurred: {e}")
     finally:
-        await client.disconnect()
+        await telegram_manager.stop()
 
 if __name__ == '__main__':
     asyncio.run(main())
