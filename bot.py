@@ -139,42 +139,39 @@ class GitHubManager:
             body = release.get('body', 'No description provided.')
             html_url = release.get('html_url', f'https://github.com/{repo}/releases')
 
-            logging.info(f"Checking release for {APP_NAME}: current version {LATEST_VERSION}, latest version {tag_name}")
-
             if tag_name == LATEST_VERSION:
                 logging.info(f"Release {tag_name} for {APP_NAME} is already up-to-date.")
                 continue
-
             if len(body) > 1024:
                 body = f"[too long]({html_url})"
             if not assets:
                 logging.info(f"No assets found in the latest release for {APP_NAME}.")
                 continue
-
-            # Process and publish the new release
-            asset_files = [asset for asset in assets if asset['name'].endswith(('.apk', '.apks', '.aab'))]
-            for asset in asset_files:
-                asset_url = asset['browser_download_url']
-                local_filename = asset['name']
-                logging.info(f"Downloading {local_filename}...")
-                FileManager.download_file(asset_url, local_filename)
-                logging.info(f"Downloaded {local_filename}.")
-                message = (
-                    f"**Name**: [{APP_NAME}](https://github.com/{repo})\n"
-                    f"**Version**: {tag_name}\n"
-                    f"**Description**: {body}\n"
-                    f"**Tags**: #opensource"
-                )
-                logging.info(f"Uploading {local_filename} to Telegram...")
-                for CHANNEL_ID in target_channels:
-                    await client.send_file(CHANNEL_ID, local_filename, caption=message)
-                logging.info(f"Uploaded {local_filename} to Telegram.")
-                os.remove(local_filename)
-
-            # Update and save the latest version
-            repo_info['latest_version'] = tag_name
-            self.config_manager.save_config()
-            logging.info(f"Updated latest version for {APP_NAME} to {tag_name}.")
+            for CHANNEL_ID in target_channels:
+                async for message in client.iter_messages(CHANNEL_ID, search=tag_name):
+                    if tag_name in message.message:
+                        logging.info(f"Release {tag_name} for {APP_NAME} already posted in {CHANNEL_ID}.")
+                        break
+                else:
+                    asset_files = [asset for asset in assets if asset['name'].endswith(('.apk', '.apks', '.aab'))]
+                    for asset in asset_files:
+                        asset_url = asset['browser_download_url']
+                        local_filename = asset['name']
+                        logging.info(f"Downloading {local_filename}...")
+                        FileManager.download_file(asset_url, local_filename)
+                        logging.info(f"Downloaded {local_filename}.")
+                        message = (
+                            f"**Name**: [{APP_NAME}](https://github.com/{repo})\n"
+                            f"**Version**: {tag_name}\n"
+                            f"**Description**: {body}\n"
+                            f"**Tags**: #opensource"
+                        )
+                        logging.info(f"Uploading {local_filename} to Telegram...")
+                        await client.send_file(CHANNEL_ID, local_filename, caption=message)
+                        logging.info(f"Uploaded {local_filename} to Telegram.")
+                        os.remove(local_filename)
+                    repo_info['latest_version'] = tag_name
+                    self.config_manager.save_config()
 
 async def initialize_new_channel(client, source_channel, channels):
     async for post in client.iter_messages(source_channel, limit=1):
@@ -185,13 +182,12 @@ async def initialize_new_channel(client, source_channel, channels):
 async def process_github_periodically(github_manager, client, target_channels):
     while True:
         await github_manager.process_github_releases(client, target_channels)
-        await asyncio.sleep(21600)  # Sleep for 6 hours (21600 seconds)
-        
+        await asyncio.sleep(21600)
 async def main():
     config_manager = ConfigManager(CONFIG_FILENAME)
     telegram_manager = TelegramManager(config_manager)
     github_manager = GitHubManager(config_manager)
-    mode = int(input("[1]: repost messages\n[2]: repost messages + format messages\n[3]: repost messages + github\n[4] format messages\n[5]: repost all messages\nEnter mode: "))
+    mode = int(input("1 - repost messages\n2 - format messages\n3 - repost messages + github\n4 - format messages + github\n5 - repost all messages\nEnter mode: "))
     await telegram_manager.start()
 
     try:
@@ -199,17 +195,18 @@ async def main():
             if 'last_id' not in config_manager.config['channels'][source_channel] or config_manager.config['channels'][source_channel]['last_id'] == 0:
                 await initialize_new_channel(telegram_manager.client, source_channel, config_manager.config['channels'])
         config_manager.save_config()
-        asyncio.create_task(process_github_periodically(github_manager, telegram_manager.client, config_manager.config['target_channel']))
+
         while True:
             for source_channel in config_manager.config['channels']:
                 await telegram_manager.process_messages(source_channel, config_manager.config['target_channel'], mode)
             if mode in [3, 4]:
-                pass
+               asyncio.create_task(process_github_periodically(github_manager, telegram_manager.client, config_manager.config['target_channel']))
             await asyncio.sleep(15)
     except Exception as e:
         logging.error(f"An error occurred: {e}")
     finally:
         await telegram_manager.stop()
+
 
 if __name__ == '__main__':
     asyncio.run(main())
