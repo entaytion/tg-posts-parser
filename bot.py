@@ -29,20 +29,12 @@ class FileManager:
 
 class MessageFormatter:
     @staticmethod
-    def format_description(description):
-        description = re.sub(r'^(#+\s)', '', description, flags=re.MULTILINE)
-        description = re.sub(r'@\w+', '', description)
-        description = re.sub(r'\(#\d+\)', '', description)
-        description = ' '.join(description.split())
-        return description
-
-    @staticmethod
     async def format_post_message(post, source_channel, regex_patterns, channels):
         date_str = post.date.astimezone(datetime.timezone(datetime.timedelta(hours=3))).strftime("%d/%m/%Y %H:%M:%S")
         message_text = post.message if post.message else ''
         for pattern in regex_patterns:
             message_text = re.sub(pattern, '', message_text)
-        post_url = f"[@{source_channel}/{post.id}](https://t.me/{channels[source_channel]['id']}/{post.id})"
+        post_url = f"[@{source_channel}/{post.id}](https://t.me/{channels[source_channel]['last_id']}/{post.id})"
         formatted_message = (
             f"**Channel:** {channels[source_channel]['name']}\n"
             f"**Date:** {date_str}\n"
@@ -91,20 +83,44 @@ class TelegramManager:
             if post.id <= last_id:
                 continue
             self.config['channels'][source_channel]['last_id'] = post.id
-            if post.sticker:
+            if mode == 5:
+                for channel in target_channels:
+                    try:
+                        await self.client.forward_messages(channel, post.id, source_channel)
+                    except errors.FloodWaitError as e:
+                        logging.warning(f"Flood wait error: sleeping for {e.seconds} seconds")
+                        await asyncio.sleep(e.seconds)
+                    except errors.RPCError as e:
+                        logging.error(f"Failed to forward message to {channel}: {e}")
+            
+            elif post.sticker:
                 logging.info(f'Skipping sticker message {post.id} in channel {source_channel}')
                 continue
+
+            formatted_messages = []
             if post.media and isinstance(post.media, types.MessageMediaDocument):
                 if mode == 1:
                     for channel in target_channels:
                         await self.client.forward_messages(channel, post.id, source_channel)
                 elif mode == 2:
-                    await self.forward_documents(post, target_channels)
-                    formatted_messages = await MessageFormatter.format_post_message(post, source_channel, self.config['regex_patterns'], self.config['channels'])
-                    for message in formatted_messages:
-                        await self.publish_message(target_channels, message)
-        self.config_manager.save_config()
+                    formatted_message = await MessageFormatter.format_post_message(post, source_channel, self.config['regex_patterns'], self.config['channels'])
+                    formatted_message_text = formatted_message[0] if formatted_message else ''
 
+                    for channel in target_channels:
+                        try:
+                            await self.client.send_file(
+                                channel,
+                                post.media.document,
+                                caption=formatted_message_text,
+                                link_preview=False
+                            )
+                        except errors.FloodWaitError as e:
+                            logging.warning(f"Flood wait error: sleeping for {e.seconds} seconds")
+                            await asyncio.sleep(e.seconds)
+                        except errors.RPCError as e:
+                            logging.error(f"Failed to forward document to {channel}: {e}")
+
+        self.config_manager.save_config()
 class GitHubManager:
     def __init__(self, config_manager):
         self.config_manager = config_manager
@@ -168,7 +184,6 @@ class GitHubManager:
                     repo_info['latest_version'] = tag_name
                     self.config_manager.save_config()
 
-
 async def initialize_new_channel(client, source_channel, channels):
     async for post in client.iter_messages(source_channel, limit=1):
         if 'last_id' not in channels[source_channel] or channels[source_channel]['last_id'] == 0:
@@ -180,7 +195,7 @@ async def main():
     telegram_manager = TelegramManager(config_manager)
     github_manager = GitHubManager(config_manager)
 
-    mode = int(input("1 - repost messages\n2 - format messages\n3 - repost messages + github\n4 - format messages + github:\nEnter mode: "))
+    mode = int(input("1 - repost messages\n2 - format messages\n3 - repost messages + github\n4 - format messages + github\n5 - repost all messages\nEnter mode: "))
 
     await telegram_manager.start()
 
@@ -188,7 +203,6 @@ async def main():
         for source_channel in config_manager.config['channels']:
             if 'last_id' not in config_manager.config['channels'][source_channel] or config_manager.config['channels'][source_channel]['last_id'] == 0:
                 await initialize_new_channel(telegram_manager.client, source_channel, config_manager.config['channels'])
-        
         config_manager.save_config()
 
         while True:
